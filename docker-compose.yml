@@ -1,0 +1,225 @@
+services:
+
+  # =========================
+  # PostgreSQL
+  # Source + Airflow metadata
+  # =========================
+
+  postgres-src:
+    image: postgres:14
+    container_name: de-big-postgres-src
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: mydb
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_app_data:/var/lib/postgresql/data
+    networks:
+      - de_net
+
+
+  # =========================
+  # MinIO
+  # =========================
+
+  minio:
+    image: minio/minio:latest
+    container_name: de-big-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    ports:
+      - "9002:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - de_net
+
+
+  # =========================
+  # MinIO initialization
+  # =========================
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: de-big-minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set myminio http://minio:9000 minio minio123;
+      mc mb -p myminio/data;
+      exit 0;
+      "
+    networks:
+      - de_net
+
+
+  # =========================
+  # ClickHouse
+  # =========================
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.10
+    container_name: de-big-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    networks:
+      - de_net
+
+
+  # =========================
+  # Airflow initialization
+  # =========================
+
+  airflow-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: de-big-airflow-init
+    depends_on:
+      - postgres-src
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres-src:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: >
+      bash -c "
+      airflow db migrate &&
+      airflow users create
+      --username admin
+      --password admin
+      --firstname Admin
+      --lastname User
+      --role Admin
+      --email admin@example.com || true
+      "
+    networks:
+      - de_net
+
+
+  # =========================
+  # Airflow webserver
+  # =========================
+
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: de-big-airflow-webserver
+    restart: unless-stopped
+    depends_on:
+      - postgres-src
+      - airflow-init
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres-src:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: api-server
+    networks:
+      - de_net
+    group_add:
+      - "986"
+
+  # =========================
+  # Airflow scheduler
+  # =========================
+
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: de-big-airflow-scheduler
+    restart: unless-stopped
+    depends_on:
+      - postgres-src
+      - airflow-init
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres-src:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://de-big-airflow-webserver:8080/execution/
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: scheduler
+    networks:
+      - de_net
+    group_add:
+      - "986"
+
+
+  # =========================
+  # Airflow DAG processor
+  # =========================
+
+  airflow-dag-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: de-big-airflow-dag-processor
+    restart: unless-stopped
+    depends_on:
+      - postgres-src
+      - airflow-init
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres-src:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: dag-processor
+    networks:
+      - de_net
+    group_add:
+      - "986"
+
+
+# =========================
+# Network
+# =========================
+
+networks:
+  de_net:
+    driver: bridge
+
+
+# =========================
+# Volumes
+# =========================
+
+volumes:
+  postgres_app_data:
+  minio_data:
+  clickhouse_data:
